@@ -1,0 +1,5 @@
+Flask>=3.0.3
+sentence_transformers>=2.7.0
+tavily_python>=0.3.3
+trafilatura>=1.9.0
+transformers>=4.40.2
