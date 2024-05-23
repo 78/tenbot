@@ -4,27 +4,18 @@ import urllib
 import trafilatura
 import sqlite3
 import os
+from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify
-from sentence_transformers import CrossEncoder
 from transformers import AutoTokenizer
+from selenium import webdriver
 
-tavily_api_key = os.environ["TAVILY_API_KEY"]
-reranker_model_path = os.environ["RERANKER_MODEL_PATH"]
 tokenizer_path = os.environ["TOKENIZER_PATH"]
 db_path = './db.sqlite3'
-
-# Tavily API
-from tavily import TavilyClient
-tavily = TavilyClient(api_key=tavily_api_key)
+user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
 
 # init tokenizer
 print("Loading tokenizer", tokenizer_path)
 tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-
-# init reranker model
-print("Loading reranker model", reranker_model_path)
-model = CrossEncoder(reranker_model_path, max_length=512)
-print("Reranker model loaded.")
 
 # init sqlite3 db
 conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -32,56 +23,73 @@ CREATE_TABLE = '''CREATE TABLE IF NOT EXISTS messages
     (user_id TEXT, chat_id TEXT, ip TEXT, timestamp INTEGER, model TEXT, completed BOOLEAN, role TEXT, content TEXT)'''
 conn.execute(CREATE_TABLE)
 
+# create a new Crhome session
+chrome_options = webdriver.ChromeOptions()
+chrome_options.add_argument('--headless')
+chrome_options.add_argument('--disable-gpu')
+chrome_options.add_argument('--no-sandbox')
+chrome_options.add_argument(f'--user-agent={user_agent}')
+print('Starting Chrome...')
+driver = webdriver.Chrome(options=chrome_options)
+print('Session ID:', driver.session_id)
+driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
 # init flask app
 app = Flask(__name__)
+
 
 @app.route('/tokenize', methods=['POST'])
 def tokenize():
     # tokenizer query and return token count
     data = request.get_json()
-    tokens = tokenizer.tokenize(data['query'])
+    query = data['query']
+    cut = data.get('cut')
+    tokens = tokenizer.encode(query, add_special_tokens=False)
+    if cut:
+        tokens = tokens[:cut]
+        data['shortened'] = tokenizer.decode(tokens)
     data['count'] = len(tokens)
     return jsonify(data)
+
+
+def extract_bing_results(html):
+    # use lxml parser
+    soup = BeautifulSoup(html, 'lxml')
+    # locate results
+    results = []
+    for result in soup.find_all('li', class_='b_algo'):
+        # extract the title
+        title = result.find('h2').text
+        # extract the URL
+        url = result.find('a').get('href')
+        # extract the description by class .b_caption
+        description = result.find('div', class_='b_caption').text
+        results.append({'title': title, 'url': url, 'description': description})
+    if len(results) == 0:
+        # if no results found, return the whole page
+        return soup.text
+    return results
 
 
 @app.route('/search_web', methods=['POST'])
 def search_web():
     data = request.get_json()
     query = data['query']
-    if len(query) < 5:
-        query += "的有关内容"
-
+    print('Bing search for:', query)
     start_time = time.time()
-    print('Searching for:', query)
     try:
-        response = tavily.search(query=query, search_depth="advanced", max_results=10)
-        results = response['results']
-
-        # tokenizer content in results
-        for r in results:
-            ids = tokenizer.encode(r['content'], add_special_tokens=False)
-            if len(ids) > 200:
-                ids = ids[:200]
-                r['content'] = tokenizer.decode(ids) + '...'
-
-        # construct sentence pairs
-        sentence_pairs = [[query, r['content']] for r in results]
-
-        # calculate scores of sentence pairs
-        scores = model.predict(sentence_pairs).tolist()
-
-        # set score to results
-        for i, r in enumerate(results):
-            r['score'] = scores[i]
-            del r['raw_content']
+        # use bing search api to get search results
+        url = f'https://cn.bing.com/search?q={urllib.parse.quote(query)}'
+        driver.get(url)
+        results = extract_bing_results(driver.page_source)
+        print('Results:', len(results))
     except Exception as e:
         print(e)
-        results = []
-    
-    # sort by scores descending
+        results = str(e)
+
     data = {
         'query': query,
-        'results': sorted(results, key=lambda x: x['score'], reverse=True)[:3],
+        'results': results,
         'response_time': time.time() - start_time
     }
     return jsonify(data)
@@ -90,26 +98,20 @@ def search_web():
 @app.route('/visit_url', methods=['POST'])
 def visit_url():
     data = request.get_json()
+    start_time = time.time()
 
     try:
-        url = urllib.parse.quote(data['url'], safe=':/')
-        r = urllib.request.Request(url)
-        # set or unset user agent to avoid 403 error
-        r.headers.pop('User-Agent', None)
-        # r.add_header("User-Agent", "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)")
-        response = urllib.request.urlopen(r)
-        data = response.read()
-
-        # Parse the article
-        result = trafilatura.extract(data)
+        driver.get(data['url'])
+        result = trafilatura.extract(driver.page_source)
         if not result:
             result = 'No text content found.'
-        print('Visited:', url, 'Extracted:', len(result))
+        print('Extracted:', len(result))
     except Exception as e:
         result = str(e)
 
     return jsonify({
-        'content': result
+        'content': result,
+        'response_time': time.time() - start_time
     })
 
 

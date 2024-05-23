@@ -80,13 +80,13 @@ import { message } from 'ant-design-vue';
 
 const Tools = [{
   'name': 'search_web',
-  'description': 'Search the Internet for the given query and return the top 3 results. The results should include the URL, title, and content.',
+  'description': 'Search the Internet for the given query. When using search results to answer questions, remember to add reference links to related keywords in this format: [Keyword](https://news.com "Title").',
   'parameters': {
       "type": "object",
       "properties": {
           "query": {
               "type": "string",
-              "description": "The search sentence by extending the give query, at least 5 characters long"
+              "description": "The search query"
           }
       },
       "requimjred": [
@@ -345,7 +345,7 @@ export default {
 
     getMessages() {
       let systemMessage = DefaultSystemPrompt;
-      if (this.model.toLowerCase().indexOf('qwen') !== -1) {
+      if (this.model.toLowerCase().indexOf('qwen-110b') !== -1) {
         systemMessage = `${DefaultSystemPrompt}\n\n${ToolsTemplate}`
       }
       const messages = this.messages.map(m => { return { role: m.role, content: m.content.trim() };});
